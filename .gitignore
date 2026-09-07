@@ -213,3 +213,6 @@ week6/*/*.jsonl
 week6/*.pth
 week6/*.joblib
 week8/*.pth
+
+# keep documentation screenshots despite the blanket *.png rule above
+!reconciliation/screenshots/*.png
