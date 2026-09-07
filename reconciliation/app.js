@@ -71,9 +71,44 @@ const messages = document.getElementById("messages");
 const form = document.getElementById("ask-form");
 const input = document.getElementById("q");
 const btn = form.querySelector("button");
+const llmBadge = document.getElementById("llm-badge");
 
 let selectedChannel = null;
+let chatTurns = [];
+let activeController = null;
 const CIRC = 2 * Math.PI * 58;
+
+const ANALYST_BRIEF = `You are the reconciliation assistant embedded in "Reconciliation Command", an ops dashboard for a payments team. Answer questions about the run data below for the channel the operator has selected. Be concise (2-5 sentences, or a short "-" bullet list for multi-part questions), cite exact numbers from the data, and write like a sharp ops analyst - no filler, no "As an AI" disclaimers. If something isn't in the data, say so plainly instead of guessing. This is seeded demo data for a course project, not live production figures - only mention that if it's directly relevant to the question.
+
+Full channel dataset (JSON):
+${JSON.stringify(CHANNELS, null, 2)}`;
+
+let samplePromise = null;
+function getSample() {
+  if (!samplePromise) {
+    samplePromise = window.claude?.use ? window.claude.use("sample").catch(() => null) : Promise.resolve(null);
+  }
+  return samplePromise;
+}
+
+getSample().then((sample) => {
+  llmBadge.textContent = sample ? "Claude live" : "static preview";
+  llmBadge.className = "llm-badge " + (sample ? "live" : "offline");
+});
+
+const SAMPLE_ERROR_COPY = {
+  not_granted: "Allow this artifact to use Claude when prompted, then ask again.",
+  not_declared: "Live Q&A only runs inside a published Claude artifact.",
+  sampling_disabled: "Claude isn't available for this account right now.",
+  rate_limited: "Hit a rate limit - wait a few seconds and try again.",
+  refused: "Claude declined to answer that one - try rephrasing.",
+  empty_completion: "Didn't get a usable answer - try asking something more specific.",
+  cancelled: "Stopped.",
+  prompt_too_large: "That question plus the run data is too large for one call.",
+};
+function copyForError(err) {
+  return SAMPLE_ERROR_COPY[err?.code] || "Couldn't reach Claude just now - try again.";
+}
 
 function matchRate(channel) {
   const total = channel.matched + channel.exceptions;
@@ -126,6 +161,7 @@ function add(role, text) {
   el.textContent = text;
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
+  return el;
 }
 
 function clearMessages() {
@@ -167,7 +203,9 @@ function renderChannelCards(query = "") {
 }
 
 function showNoChannel() {
+  if (activeController) activeController.abort();
   selectedChannel = null;
+  chatTurns = [];
   statusEmpty.classList.remove("hidden");
   statusBody.classList.add("hidden");
   statusBody.replaceChildren();
@@ -243,7 +281,9 @@ function selectChannel(id) {
     return;
   }
 
+  if (activeController) activeController.abort();
   selectedChannel = channel;
+  chatTurns = [{ role: "user", content: `${ANALYST_BRIEF}\n\nThe operator just opened the "${channel.name}" channel.` }];
   renderChannelCards(filterInput.value);
   renderStatus(channel);
   chatHint.textContent = `Live on ${channel.name}`;
@@ -272,17 +312,42 @@ form.addEventListener("submit", async (e) => {
   add("user", question);
   input.value = "";
   btn.disabled = true;
+  input.disabled = true;
 
-  try {
-    await new Promise((r) => setTimeout(r, 400));
-    add(
-      "bot",
-      `Channel: ${selectedChannel.name}\nReceived: “${question}”\n\nWhen the local LLM and MCP are connected, the answer will appear here.`
-    );
-  } catch (_err) {
-    add("bot", "Could not reach the assistant. Check that the local engine is running.");
-  } finally {
+  chatTurns.push({ role: "user", content: question });
+  const bubble = add("bot", "Thinking…");
+  bubble.classList.add("streaming");
+
+  const sample = await getSample();
+  if (!sample) {
+    bubble.classList.remove("streaming");
+    bubble.textContent = copyForError({ code: "not_declared" });
     btn.disabled = false;
+    input.disabled = false;
+    input.focus();
+    return;
+  }
+
+  const controller = new AbortController();
+  activeController = controller;
+  try {
+    const { text } = await sample(chatTurns, {
+      modelTier: "quick",
+      cache: false,
+      signal: controller.signal,
+      onText: ({ text }) => {
+        bubble.textContent = text;
+        messages.scrollTop = messages.scrollHeight;
+      },
+    });
+    chatTurns.push({ role: "assistant", content: text });
+  } catch (err) {
+    bubble.textContent = err?.text || copyForError(err);
+  } finally {
+    bubble.classList.remove("streaming");
+    if (activeController === controller) activeController = null;
+    btn.disabled = false;
+    input.disabled = false;
     input.focus();
   }
 });
